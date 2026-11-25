@@ -12,6 +12,8 @@ import json
 import vapoursynth as vs
 from vapoursynth import core
 
+import wp_timing
+
 PADDING = {"v4_26": 64, "v4_25_lite": 128, "v4_22_lite": 32}
 
 
@@ -38,8 +40,12 @@ def padded_size(width, height, model):
     return (width + m - 1) // m * m, (height + m - 1) // m * m
 
 
-def interpolate(clip, cfg):
-    """clip: YUV-Video mit korrekter fps. Gibt YUV im selben Format zurück."""
+def interpolate(clip, cfg, timing=None):
+    """
+    clip:   YUV-Video mit korrekter fps. Gibt YUV im selben Format zurück.
+    timing: das Video so, wie mpv es liefert (mit den echten Bilddauern).
+            Ohne timing bekommen die Ausgabebilder die Nenn-Bildrate.
+    """
     import vsmlrt
 
     model_key = cfg.get("model", "v4_26")
@@ -75,5 +81,30 @@ def interpolate(clip, cfg):
     # mpv berechnet die Zeitstempel aus _DurationNum/_DurationDen
     fps = Fraction(clip.fps_num, clip.fps_den) * multi
     out = core.std.AssumeFPS(out, fpsnum=fps.numerator, fpsden=fps.denominator)
-    out = core.std.SetFrameProps(out, _DurationNum=fps.denominator, _DurationDen=fps.numerator)
-    return out
+    if timing is None:
+        return core.std.SetFrameProps(out, _DurationNum=fps.denominator, _DurationDen=fps.numerator)
+    return real_timestamps(out, timing, multi, nominal=Fraction(clip.fps_den, clip.fps_num))
+
+
+def real_timestamps(out, src, multi, nominal):
+    """
+    Gibt jedem Ausgabebild die Dauer, die zu den echten Zeitstempeln der
+    Quelle passt (siehe wp_timing). So stimmt der Ton an jedem echten Bild
+    wieder exakt, statt sich bis zum nächsten Sprung zu verschieben.
+    """
+    last = src.num_frames - 1
+    base = core.std.BlankClip(src, length=out.num_frames, keep=True)
+    # Wie vs-mlrt: FrameEval liefert pro Ausgabebild das passende Quellbild
+    left = core.std.FrameEval(base, lambda n: src[min(wp_timing.source_index(n, multi), last)])
+    right = core.std.FrameEval(base, lambda n: src[min(wp_timing.source_index(n, multi) + 1, last)])
+
+    def stamp(n, f):
+        a = wp_timing.frame_duration(f[1].props, nominal)
+        b = wp_timing.frame_duration(f[2].props, nominal)
+        d = wp_timing.output_duration(n, multi, a, b)
+        res = f[0].copy()
+        res.props["_DurationNum"] = d.numerator
+        res.props["_DurationDen"] = d.denominator
+        return res
+
+    return core.std.ModifyFrame(out, [out, left, right], stamp)

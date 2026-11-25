@@ -20,7 +20,7 @@ function fakeSession(prefs = {}, status = {}) {
   };
   const installer = { status: () => ({ supported: true, base: true, framegen: true, models: ['v4_26'], ...status }) };
   const s = new Session({ relay, settings, installer, framegen, configDir: os.tmpdir(), logDir: os.tmpdir() });
-  clearInterval(s.syncTimer); clearInterval(s.statusTimer); clearInterval(s.uiTimer);
+  clearInterval(s.syncTimer); clearInterval(s.statusTimer); clearInterval(s.uiTimer); clearInterval(s.avTimer);
   return s;
 }
 
