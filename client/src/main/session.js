@@ -14,6 +14,12 @@ const { Mpv } = require('./mpv');
 
 const SYNC_MS = 250;
 const STATUS_MS = 2000;
+// Tonwächter bei Framegen: alle AV_CHECK_FRAMES echten Bilder nachsehen, ob Bild und Ton zusammenpassen
+const AV_CHECK_FRAMES = 8;
+const AV_LIMIT = 0.12;          // s Versatz, ab dem es auffällt
+const AV_BAD_CHECKS = 6;        // so oft hintereinander, bevor neu synchronisiert wird
+const AV_RESYNC_GAP = 15000;    // ms, höchstens so oft neu synchronisieren
+const AV_QUIET_MS = 4000;       // ms nach Sprung/Filterwechsel nicht prüfen (Filter lädt neu)
 const AutoQuality = require('../renderer/auto-quality');
 /** YouTube-Qualitäten (yt-dlp-Format, jeweils höchstens so hoch) */
 const YT_QUALITIES = [
@@ -99,6 +105,8 @@ class Session extends EventEmitter {
     this.syncTimer = setInterval(() => this.syncTick(false), SYNC_MS);
     this.statusTimer = setInterval(() => this.reportStatus(), STATUS_MS);
     this.uiTimer = setInterval(() => this.pushPlayerState(), 500);
+    this.avTimer = setInterval(() => this.avTick(), 100);
+    if (this.avTimer.unref) this.avTimer.unref();
   }
 
   reset() {
@@ -121,6 +129,12 @@ class Session extends EventEmitter {
     this.userSeek = false;
     this.planInfo = null;
     this.lastPlanKey = null;
+    this.avBad = 0;           // Tonwächter: Prüfungen hintereinander mit zu großem Versatz
+    this.avLastCheck = 0;
+    this.avChecking = false;
+    this.avQuietUntil = 0;
+    this.avLastResync = 0;
+    this.avResyncs = [];
     this.trackSel = null;     // Spurwahl nach selectTracks(); spätere Änderungen kamen vom Nutzer
     this.lastButtons = {};
     this.stopTwitchMap();
@@ -680,6 +694,7 @@ class Session extends EventEmitter {
     const wantCopy = vf.some((f) => f.startsWith('@wprife:'));
     const hwdec = wantCopy ? 'auto-copy' : 'auto';
     if (mpv.props['hwdec'] !== hwdec) { mpv.props.hwdec = hwdec; await mpv.set('hwdec', hwdec).catch(() => {}); }
+    this.avQuietUntil = Date.now() + AV_QUIET_MS;
     try {
       await mpv.command('vf', 'set', vf.join(','));
       if (info.framegen && info.framegen.state === 'on') mpv.osd(`Framegen an: ${fmtFps(info.framegen.from)} → ${fmtFps(info.framegen.to)} fps`, 3000);
@@ -839,6 +854,57 @@ class Session extends EventEmitter {
     // Verstärkung 0,4: ein Player, der dauerhaft 5 % zu langsam läuft, bleibt so unter ~0,15 s Abweichung
     const maxAdj = catchUp && ad > 0.5 ? 0.25 : 0.06;
     this.setSpeed(this.correcting ? 1 + Math.max(-maxAdj, Math.min(maxAdj, diff * 0.4)) : 1);
+  }
+
+  /**
+   * Tonwächter für Framegen. Die Zeitstempel hinter RIFE stimmen an jedem echten
+   * Bild (vpy/wp_timing.py). Alle paar echten Bilder fragt der Client mpv trotzdem,
+   * wie weit Bild und Ton gerade auseinander liegen (avsync). Bleibt der Versatz
+   * länger zu groß, kommt meist die Grafikkarte nicht hinterher: dann einmal an
+   * dieselbe Stelle springen, das lädt den Filter neu und Bild und Ton starten
+   * wieder gemeinsam.
+   */
+  avTick() {
+    const mpv = this.mpv;
+    const pb = this.playback;
+    const fg = this.planInfo && this.planInfo.framegen;
+    const now = Date.now();
+    if (!fg || fg.state !== 'on' || !mpv || !mpv.running || !pb || !pb.item || !pb.playing || !this.fileReady ||
+        mpv.props.pause || mpv.props.seeking || mpv.props['paused-for-cache'] || this.pendingSeeks || now < this.avQuietUntil) {
+      this.avBad = 0;
+      return;
+    }
+    const every = Math.min(500, Math.max(100, (AV_CHECK_FRAMES / (fg.from || 24)) * 1000));
+    if (this.avChecking || now - this.avLastCheck < every) return;
+    this.avLastCheck = now;
+    this.avChecking = true;
+    mpv.get('avsync').then((v) => {
+      if (typeof v !== 'number' || !Number.isFinite(v) || this.mpv !== mpv) return;
+      this.avBad = Math.abs(v) > AV_LIMIT ? this.avBad + 1 : 0;
+      if (this.avBad >= AV_BAD_CHECKS) this.avResync(v);
+    }).catch(() => {}).finally(() => { this.avChecking = false; });
+  }
+
+  avResync(v) {
+    const mpv = this.mpv;
+    const now = Date.now();
+    this.avBad = 0;
+    if (!mpv || now - this.avLastResync < AV_RESYNC_GAP) return;
+    this.avLastResync = now;
+    this.avResyncs = this.avResyncs.filter((t) => now - t < 180000);
+    this.avResyncs.push(now);
+    const ms = Math.round(Math.abs(v) * 1000);
+    if (this.avResyncs.length >= 3) {
+      mpv.osd(`Ton lag ${ms} ms daneben: Die Grafikkarte kommt mit Framegen nicht hinterher. Kleineren Faktor oder ein Lite-Modell probieren.`, 6000);
+    } else {
+      mpv.osd(`Ton neu synchronisiert (${ms} ms)`, 2000);
+    }
+    this.ui('player:avsync', { offset: v, resyncs: this.avResyncs.length });
+    if (!this.playback.item.ext) this.seekLocal(this.expectedPos());
+    else {
+      const t = mpv.props['time-pos'];
+      if (Number.isFinite(t)) this.seekTo(t);
+    }
   }
 
   playerStateName() {
@@ -1044,10 +1110,12 @@ class Session extends EventEmitter {
     switch (e.event) {
       case 'file-loaded': this.onFileLoaded(); break;
       case 'seek':
+        this.avQuietUntil = Date.now() + AV_QUIET_MS;
         if (this.pendingSeeks > 0) this.pendingSeeks--;
         else if (this.fileReady && Date.now() - this.ourSeekAt > 1500) this.userSeek = true;
         break;
       case 'playback-restart':
+        this.avQuietUntil = Date.now() + AV_QUIET_MS;
         this.pendingSeeks = 0; // mpv fasst schnelle Sprünge zusammen
         if (this.userSeek) {
           this.userSeek = false;
@@ -1113,6 +1181,7 @@ class Session extends EventEmitter {
     clearInterval(this.syncTimer);
     clearInterval(this.statusTimer);
     clearInterval(this.uiTimer);
+    clearInterval(this.avTimer);
     this.relay.leave();
     await this.stopPlayer();
   }

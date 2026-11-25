@@ -34,6 +34,8 @@ jobs:
           node --test relay/test/movie-versions.test.js relay/test/library.test.js relay/test/playback-quality.test.js relay/test/playback-source.test.js
       - name: Tests (Relay + Agent + Client-Kern mit simuliertem mpv)
         run: npm test --prefix client
+      - name: Tests (Framegen-Zeitstempel)
+        run: python3 client/vpy/test_wp_timing.py
 
   windows:
     needs: test

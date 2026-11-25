@@ -31,6 +31,7 @@ Zwischenbilder werden mit [RIFE](https://github.com/hzwer/ECCV2022-RIFE) über [
 - **Modelle:** *4.26* für die beste Qualität, die *Lite*-Modelle sind schneller.
 - **Beim ersten Film einer neuen Auflösung** baut TensorRT eine Engine für deine Karte. Das dauert einmalig 1–10 Minuten und läuft im Hintergrund. Der Film läuft solange ohne Framegen weiter und schaltet dann automatisch um.
 - Szenenwechsel werden erkannt, damit keine Zwischenbilder über harte Schnitte gerechnet werden.
+- **Ton bleibt synchron:** Jedes Zwischenbild bekommt seine Dauer aus den echten Zeitstempeln der beiden Originalbilder, zwischen denen es liegt. Dadurch stimmt der Zeitstempel an jedem echten Bild wieder exakt, auch bei DVD-Rips mit krummen oder schwankenden Bildraten (`vpy/wp_timing.py`). Zusätzlich fragt der Client alle 8 echten Bilder bei mpv nach, wie weit Bild und Ton auseinander liegen. Liegt der Versatz länger über 120 ms, kommt meist die Grafikkarte nicht hinterher: Dann springt der Player einmal an dieselbe Stelle und Bild und Ton starten gemeinsam neu. Passiert das öfter, gibt es einen Hinweis, den Faktor zu senken oder ein Lite-Modell zu nehmen.
 
 **Richtwerte:**
 
