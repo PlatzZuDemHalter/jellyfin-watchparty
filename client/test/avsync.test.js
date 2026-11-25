@@ -90,3 +90,34 @@ test('wiederholt: Hinweis auf zu langsame Grafikkarte', async () => {
   }
   assert.ok(calls.some((c) => c[0] === 'osd' && /kommt mit Framegen nicht hinterher/.test(c[1])));
 });
+
+test('Framegen an/aus: kein Weglassen von Bildern beim Springen, Bild und Ton starten gemeinsam neu', async () => {
+  const { s, mpv, calls } = setup(0);
+  const sets = [];
+  mpv.set = async (name, value) => { sets.push([name, value]); mpv.props[name] = value; };
+  mpv.props['video-params'] = { w: 1920, h: 1080 };
+  mpv.props['container-fps'] = 23.976;
+  s.lastPlanKey = '[]';
+  s.settings.prefs = { framegen: { enabled: true } };
+  s.installer.status = () => ({ framegen: true, models: ['v4_26'] });
+  s.framegen = { plan: () => ({ vf: ['@wprife:vapoursynth=file=x'], info: { framegen: { state: 'on', from: 23.976, to: 143.86 }, notes: [] } }), building: null };
+  s.updateButtons = () => {};
+  await s.applyFilters();
+  assert.ok(sets.some(([n, v]) => n === 'hr-seek-framedrop' && v === 'no'));
+  const iVf = calls.findIndex((c) => c[0] === 'vf' && c[1] === 'set');
+  const iSeek = calls.findIndex((c) => c[0] === 'seek');
+  assert.ok(iVf >= 0 && iSeek > iVf, 'nach dem Filterwechsel an dieselbe Stelle springen');
+
+  // wieder aus: Bilder dürfen wieder weggelassen werden, auch hier neu starten
+  calls.length = 0;
+  s.framegen.plan = () => ({ vf: [], info: { framegen: null, notes: [] } });
+  await s.applyFilters();
+  assert.ok(sets.some(([n, v]) => n === 'hr-seek-framedrop' && v === 'yes'));
+  assert.ok(calls.some((c) => c[0] === 'seek'));
+
+  // ohne Framegen ändert sich nur VSR: kein Sprung
+  calls.length = 0;
+  s.framegen.plan = () => ({ vf: ['@wpvsr:d3d11vpp=scaling-mode=nvidia'], info: { framegen: null, notes: [] } });
+  await s.applyFilters();
+  assert.ok(!calls.some((c) => c[0] === 'seek'));
+});

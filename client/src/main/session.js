@@ -681,6 +681,7 @@ class Session extends EventEmitter {
     const status = this.installer.status();
     const { vf, info } = this.framegen.plan({ params, srcFps, displayFps, displayHeight }, prefs, status);
     const key = JSON.stringify(vf);
+    const hadRife = !!(this.lastPlanKey && this.lastPlanKey.includes('@wprife:'));
     this.planInfo = info;
     this.ui('player:filters', info);
     this.updateButtons();
@@ -694,10 +695,22 @@ class Session extends EventEmitter {
     const wantCopy = vf.some((f) => f.startsWith('@wprife:'));
     const hwdec = wantCopy ? 'auto-copy' : 'auto';
     if (mpv.props['hwdec'] !== hwdec) { mpv.props.hwdec = hwdec; await mpv.set('hwdec', hwdec).catch(() => {}); }
+    // Beim genauen Springen darf der Decoder sonst Bilder vor dem Ziel weglassen. Laut mpv-Doku
+    // verträgt sich das nicht mit Filtern, die Zeitstempel ändern: Nach jedem Sprung wäre der Ton
+    // um die weggelassenen Bilder versetzt, also je nach Stelle bis zu einigen Sekunden.
+    const framedrop = wantCopy ? 'no' : 'yes';
+    if (mpv.props['hr-seek-framedrop'] !== framedrop) {
+      mpv.props['hr-seek-framedrop'] = framedrop;
+      await mpv.set('hr-seek-framedrop', framedrop).catch(() => {});
+    }
     this.avQuietUntil = Date.now() + AV_QUIET_MS;
     try {
       await mpv.command('vf', 'set', vf.join(','));
       if (info.framegen && info.framegen.state === 'on') mpv.osd(`Framegen an: ${fmtFps(info.framegen.from)} → ${fmtFps(info.framegen.to)} fps`, 3000);
+      // Framegen kommt oft erst dazu, wenn der Ton schon läuft (nach dem Laden, nach dem Engine-Bau,
+      // per F1). mpv tauscht den Filter dann im Lauf aus, der Ton spielt weiter, während RIFE noch
+      // lädt. Ein Sprung an dieselbe Stelle startet Bild und Ton wieder gemeinsam.
+      if (wantCopy || hadRife) this.restartAV();
     } catch (e) {
       this.ui('room:error', `Filter ließ sich nicht aktivieren: ${e.message}. Details im mpv-Log.`);
       await mpv.command('vf', 'clr', '').catch(() => {});
@@ -900,11 +913,18 @@ class Session extends EventEmitter {
       mpv.osd(`Ton neu synchronisiert (${ms} ms)`, 2000);
     }
     this.ui('player:avsync', { offset: v, resyncs: this.avResyncs.length });
-    if (!this.playback.item.ext) this.seekLocal(this.expectedPos());
-    else {
-      const t = mpv.props['time-pos'];
-      if (Number.isFinite(t)) this.seekTo(t);
-    }
+    this.restartAV();
+  }
+
+  /** Bild und Ton gemeinsam neu starten: genauer Sprung an die Stelle, an der der Raum gerade ist. */
+  restartAV() {
+    const mpv = this.mpv;
+    const pb = this.playback;
+    if (!mpv || !pb || !pb.item || !this.fileReady) return;
+    this.avQuietUntil = Date.now() + AV_QUIET_MS;
+    if (!pb.item.ext) { this.seekLocal(this.expectedPos()); return; }
+    const t = mpv.props['time-pos'];
+    if (Number.isFinite(t)) this.seekTo(t);
   }
 
   playerStateName() {
